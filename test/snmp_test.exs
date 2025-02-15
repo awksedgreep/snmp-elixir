@@ -286,4 +286,64 @@ defmodule SNMP.Test do
       |> SNMP.request
     end
   end
+
+  describe "bulkwalk" do
+    test "bulkwalk with community credential" do
+      uri = URI.parse("snmp://#{get_working_agent()}")
+      credential = %SNMP.CommunityCredential{
+        version: :v2,
+        sec_model: :v2c,
+        community: "public"
+      }
+      varbinds = [%{oid: "1.3.6.1.2.1.1"}]
+
+      result =
+        %{uri: uri, credential: credential, varbinds: varbinds}
+        |> SNMP.bulkwalk()
+        |> Enum.take(10)
+
+      assert length(result) > 0
+      assert Enum.all?(result, fn varbind -> is_map(varbind) end)
+    end
+
+    test "bulkwalk with USM credential" do
+      uri = URI.parse("snmp://#{get_working_agent()}")
+      credential = %SNMP.USMCredential{
+        version: :v3,
+        sec_model: :usm,
+        sec_level: :noAuthNoPriv,
+        sec_name: ~c"user",
+        auth: :usmNoAuthProtocol,
+        auth_pass: nil,
+        priv: :usmNoPrivProtocol,
+        priv_pass: nil
+      }
+      varbinds = [%{oid: "1.3.6.1.2.1.1"}]
+
+      result =
+        %{uri: uri, credential: credential, varbinds: varbinds}
+        |> SNMP.bulkwalk()
+        |> Enum.take(10)
+
+      assert length(result) > 0
+      assert Enum.all?(result, fn varbind -> is_map(varbind) end)
+    end
+
+    test "bulkwalk with invalid OID" do
+      uri = URI.parse("snmp://#{get_working_agent()}")
+      credential = %SNMP.CommunityCredential{
+        version: :v2,
+        sec_model: :v2c,
+        community: ~c"public"
+      }
+      varbinds = [%{oid: "1.3.6.1.2.1.999"}]
+
+      result =
+        %{uri: uri, credential: credential, varbinds: varbinds}
+        |> SNMP.bulkwalk()
+        |> Enum.take(10)
+
+      assert length(result) == 0
+    end
+  end
 end

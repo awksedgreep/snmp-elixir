@@ -5,18 +5,7 @@ defmodule SNMP.Utility do
   def local_engine_id,
     do: <<0x8000000006::8*5>>
 
-  # Takes
-  #
-  #      a   d
-  #     / \ /
-  #    b   c    e
-  #
-  # and returns
-  #
-  #    {bce}
-  #
-  defp subtract_minimal_elements_from_poset(poset, adj_map)
-  do
+  defp subtract_minimal_elements_from_poset(poset, adj_map) do
     poset
     |> Enum.flat_map(&Map.get(adj_map, &1, []))
     |> MapSet.new()
@@ -48,21 +37,18 @@ defmodule SNMP.Utility do
     end
   end
 
-  # Takes mappings of the form {a => [b, c, ...]} to mean
-  # a < b, a < c, ...
-  #
-  # For the Hasse diagram
-  #
-  #    a   d
-  #   / \ /
-  #  b   c    e
-  #
-  # it returns
-  #
-  #    [[b, c, e], [a, d]]
-  #
-  @spec topological_sort(%{term => [term]})
-    :: [[term], ...]
+  @spec detect_cycle([term]) :: :ok | no_return
+  def detect_cycle(list) do
+    adj_map = Enum.reduce(list, %{}, fn elem, acc ->
+      Map.update(acc, elem, [], &(&1 ++ [elem]))
+    end)
+
+    poset = Map.keys(adj_map) |> MapSet.new()
+
+    _topological_sort(poset, adj_map, [])
+  end
+
+  @spec topological_sort(%{term => [term]}) :: [[term], ...]
   def topological_sort(adjacency_map) do
     adjacency_map
     |> Map.keys()
@@ -72,7 +58,6 @@ defmodule SNMP.Utility do
 
   # Kludge to make snmp-elixir compile on 1.3.4 while
   # avoiding inevitable doom of `Enum.partition/2`
-  #
   defmacrop separate_dirs_from_files(paths) do
     if System.version() =~ ~r/^1\.[0-3]\./ do
       quote bind_quoted: [paths: paths] do
@@ -117,8 +102,7 @@ defmodule SNMP.Utility do
   @type filepaths :: [filepath, ...] | []
 
   # Analogous to GNU find
-  @spec find_files_recursive(path, pattern)
-    :: filepaths
+  @spec find_files_recursive(path, pattern) :: filepaths
   def find_files_recursive(path, pattern \\ ~r//)
 
   def find_files_recursive(path, pattern) do

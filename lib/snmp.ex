@@ -101,6 +101,35 @@ defmodule SNMP do
     end
   end
 
+  defmacrop sync_get_bulk(target, non_rep, max_rep, oids, context, timeout \\ 1000) do
+    with {:module, :snmpm} <- Code.ensure_loaded(:snmpm) do
+      if function_exported?(:snmpm, :sync_get_bulk2, 5) do
+        quote do
+          :snmpm.sync_get_bulk2(
+            __MODULE__,
+            unquote(target),
+            unquote(non_rep),
+            unquote(max_rep),
+            unquote(oids),
+            [ timeout: unquote(timeout),
+              context: unquote(context)
+            ]
+          )
+        end
+      else
+        quote do
+          :snmpm.sync_get_bulk(
+            __MODULE__,
+            unquote(target),
+            unquote(context),
+            unquote(oids),
+            unquote(timeout)
+          )
+        end
+      end
+    end
+  end
+
   @type snmp_credential()
     :: CommunityCredential.t()
      | USMCredential.t()
@@ -689,6 +718,61 @@ defmodule SNMP do
     end
   end
 
+  defp _perform_snmp_bulk_op(
+    op,
+    varbinds,
+    target,
+    context,
+    timeout,
+    non_repeaters,
+    max_repetitions
+  ) do
+    case op do
+      :get ->
+        oids =
+          varbinds
+          |> Enum.map(& &1.oid)
+          |> normalize_to_oids
+
+        sync_get_bulk(
+          target,
+          non_repeaters,
+          max_repetitions,
+          oids,
+          context,
+          timeout
+        )
+
+      :get_next ->
+        oids =
+          varbinds
+          |> Enum.map(& &1.oid)
+          |> normalize_to_oids
+
+        sync_get_bulk(
+          target,
+          context,
+          oids,
+          timeout,
+          non_repeaters,
+          max_repetitions
+        )
+
+      :set ->
+        vars_and_vals =
+          varbinds
+          |> Enum.map(fn v ->
+            if Map.has_key?(v, :type) do
+              {v.oid, v.type, v.value}
+            else
+              {v.oid, v.value}
+            end
+          end)
+
+        sync_set(target, context, vars_and_vals, timeout)
+    end
+  end
+
   def sync_get(target, oids, timeout) do
     sync_get(target, oids, timeout, "")
   end
@@ -744,6 +828,68 @@ defmodule SNMP do
           target,
           erl_context,
           get_timeout()
+        )
+
+      groom_snmp_result(result)
+    end
+  end
+
+  defp perform_snmp_bulk_op(
+    op,
+    varbinds,
+    uri,
+    credential,
+    options
+  ) do
+    target      = generate_target_name(uri, credential)
+    erl_context =
+      options
+      |> Keyword.get(:context, "")
+      |> :binary.bin_to_list()
+
+    discover_fun = fn ->
+      with %{sec_model: :usm} <- credential,
+           {:ok, eid} <- discover_engine_id(uri, target) do
+        :binary.list_to_bin(eid)
+      else
+        _error ->
+          Utility.local_engine_id()
+      end
+    end
+
+    engine_id =
+      options
+      |> Keyword.get_lazy(:engine_id, discover_fun)
+      |> :binary.bin_to_list()
+
+    non_repeaters = Keyword.get(options, :non_repeaters, 0)
+    max_repetitions = Keyword.get(options, :max_repetitions, 12)
+
+    with :ok <-
+           register_usm_user(credential, engine_id),
+         :ok <-
+           register_agent(
+             target,
+             uri,
+             credential,
+             engine_id
+           ),
+         :ok <-
+           warmup_engine_boots_and_engine_time(
+             credential,
+             engine_id,
+             target
+           )
+    do
+      result =
+        _perform_snmp_bulk_op(
+          op,
+          varbinds,
+          target,
+          erl_context,
+          get_timeout(),
+          non_repeaters,
+          max_repetitions
         )
 
       groom_snmp_result(result)
@@ -918,6 +1064,111 @@ defmodule SNMP do
       List.starts_with?(oid, base_oid)
     end)
     |> Stream.drop(1)
+  end
+
+  @doc """
+  Perform an SNMP BULKWALK using GETBULK operations.
+
+  This function returns a stream, which ensures that the
+  resulting walk is bounded.
+
+  ## Example
+
+      iex> v3_cred = %SNMP.USMCredential{
+      ...>   version: :v3,
+      ...>   sec_model: :usm,
+      ...>   sec_level: :noAuthNoPriv,
+      ...>   sec_name: 'user',
+      ...>   auth: :usmNoAuthProtocol,
+      ...>   auth_pass: nil,
+      ...>   priv: :usmNoPrivProtocol,
+      ...>   priv_pass: nil
+      ...> }
+      iex> %{uri: URI.parse("snmp://an-snmp-host.local"),
+      ...>   credential: v3_cred,
+      ...>   varbinds: [%{oid: "ipAddrTable"}],
+      ...> } |> SNMP.bulkwalk()
+      ...> |> Enum.take(1)
+      [ %{oid: [1, 3, 6, 1, 2, 1, 4, 20, 1, 1, 192, 0, 2, 1],
+          type: :IpAddress,
+          value: [192, 0, 2, 1],
+        }
+      ]
+  """
+  @spec bulkwalk(req_params, req_options) :: Enumerable.t
+  def bulkwalk(
+    %{uri: uri,
+      credential: credential,
+      varbinds: [%{oid: object}|_],
+    },
+    options \\ []
+  ) do
+    [base_oid] = normalize_to_oids([object])
+
+    %{oid: base_oid}
+    |> Stream.iterate(fn %{oid: last_oid} ->
+      %{uri: uri,
+        credential: credential,
+        varbinds: [%{oid: last_oid, type: :next}]
+      }
+      |> request_bulk(options)
+      |> case do
+        {:ok, result} -> List.first(result, nil)
+        {:error, reason} ->
+          Logger.error("BULKWALK error: #{inspect(reason)}")
+          nil
+        _ -> nil
+      end
+    end)
+    |> Stream.take_while(fn
+      nil -> false
+      %{oid: oid} -> List.starts_with?(oid, base_oid)
+    end)
+    |> Stream.drop(1)
+  end
+
+  defp request_bulk(
+    %{uri: %{scheme: _, host: _, port: _} = uri,
+      credential: credential,
+      varbinds: varbinds,
+    },
+    options \\ []
+  )   when is_list(varbinds)
+       and is_list(options)
+  do
+    with op when not is_nil(op) <-
+           ( cond do
+               Enum.all?(
+                 varbinds,
+                 & &1[:oid] && &1[:value]
+               ) ->
+                 :set
+
+               Enum.all?(
+                 varbinds,
+                 & &1[:oid] && (&1[:type] == :next)
+               ) ->
+                 :get_next
+
+               Enum.all?(varbinds, & &1[:oid]) ->
+                 :get
+
+               true ->
+                 :ok = Logger.error("Request contains unacceptable varbinds: #{inspect(varbinds)}")
+
+                 {:error, :einval}
+             end
+           ),
+         {:ok, ip_uri} <- resolve_host_in_uri(uri)
+    do
+      perform_snmp_bulk_op(
+        op,
+        varbinds,
+        ip_uri,
+        credential,
+        options
+      )
+    end
   end
 
   @type mib_name :: String.t()
