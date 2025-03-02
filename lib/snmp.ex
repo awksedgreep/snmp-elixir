@@ -101,6 +101,35 @@ defmodule SNMP do
     end
   end
 
+  defmacrop sync_get_bulk(target, non_repeaters, max_repetitions, oids, timeout, context) do
+    with {:module, :snmpm} <- Code.ensure_loaded(:snmpm) do
+      if function_exported?(:snmpm, :sync_get_bulk2, 5) do
+        quote do
+          :snmpm.sync_get_bulk2(
+            __MODULE__,
+            unquote(target),
+            unquote(non_repeaters),
+            unquote(max_repetitions),
+            unquote(oids),
+            [timeout: unquote(timeout), context: unquote(context)]
+          )
+        end
+      else
+        quote do
+          :snmpm.sync_get_bulk(
+            __MODULE__,
+            unquote(target),
+            unquote(context),
+            unquote(non_repeaters),
+            unquote(max_repetitions),
+            unquote(oids),
+            unquote(timeout)
+          )
+        end
+      end
+    end
+  end
+
   @type snmp_credential()
     :: CommunityCredential.t()
      | USMCredential.t()
@@ -920,6 +949,254 @@ defmodule SNMP do
     |> Stream.drop(1)
   end
 
+  @doc """
+  Perform an SNMP bulkwalk using GETBULK operations.
+
+  This function returns a stream that uses GETBULK for more efficient retrieval
+  of SNMP table data compared to regular walk operations.
+
+  ## Example
+
+      iex> %{uri: URI.parse("snmp://an-snmp-host.local"),
+      ...>   credential: v2_cred,
+      ...>   varbinds: [%{oid: "ifTable"}],
+      ...> } |> SNMP.bulkwalk(max_repetitions: 10)
+      ...> |> Enum.take(5)
+      [ %{...}, %{...}, %{...}, %{...}, %{...} ]
+  """
+  @spec bulkwalk(req_params, req_options)
+    :: Enumerable.t
+  def bulkwalk(
+    %{uri: uri,
+      credential: credential,
+      varbinds: [%{oid: object}|_],
+    },
+    options \\ []
+  ) do
+    # Only use bulkwalk for v2 and v3
+    case credential do
+      %CommunityCredential{version: :v1} ->
+        # Fallback to regular walk for v1
+        walk(%{uri: uri, credential: credential, varbinds: [%{oid: object}]}, options)
+
+    _ ->
+      # Use GETBULK for v2c and v3
+      [base_oid] = normalize_to_oids([object])
+      max_repetitions = Keyword.get(options, :max_repetitions, get_max_repetitions())
+      non_repeaters = Keyword.get(options, :non_repeaters, 0)
+      # debug = Keyword.get(options, :debug, false)
+
+      # Stream implementation
+      Stream.resource(
+        # Initial state with loop detection
+        fn -> {[base_oid], [], false, MapSet.new()} end,
+
+        # Process function
+        fn
+          # End of walk reached
+          {_, _, true, _} ->
+            {:halt, nil}
+
+          # We have pending results to emit
+          {next_oids, [result | rest], end_reached, seen_oids} ->
+            Logger.debug("Emitting result: #{inspect(result.oid)}")
+            {[result], {next_oids, rest, end_reached, seen_oids}}
+
+          # We need to fetch more results
+          {[_|_] = oids_to_request, [], false, seen_oids} ->
+            Logger.debug("Fetching batch with OIDs: #{inspect(oids_to_request)}")
+
+            case bulkwalk_get_next_batch(uri, credential, oids_to_request, non_repeaters, max_repetitions, base_oid, options) do
+              {:ok, results, next_oids, end_reached} ->
+                if Enum.empty?(results) do
+                  Logger.debug("No results in subtree, ending walk")
+                  {:halt, nil}
+                else
+                  # Check if we've already seen these OIDs (loop detection)
+                  new_oid_set = MapSet.new(results, & &1.oid)
+
+                  # Check if all new OIDs are already seen (loop detection)
+                  loop_detected = MapSet.subset?(new_oid_set, seen_oids) && !Enum.empty?(new_oid_set)
+
+                  if loop_detected do
+                    Logger.debug("Loop detected - all received OIDs have been seen before")
+                    {:halt, nil}
+                  else
+                    # Update seen OIDs with the new results
+                    updated_seen = MapSet.union(seen_oids, new_oid_set)
+
+                    # Continue the walk with these results
+                    [first | rest] = results
+                    {[first], {next_oids, rest, end_reached, updated_seen}}
+                  end
+                end
+
+              {:error, reason} ->
+                Logger.debug("Error in bulkwalk: #{inspect(reason)}")
+                {:halt, nil}
+            end
+
+          # No more OIDs to request
+          {[], [], _, _} ->
+            Logger.debug("No more OIDs to request, ending walk")
+            {:halt, nil}
+        end,
+
+        # Cleanup function
+        fn _ -> nil end
+      )
+  end
+end
+
+# Helper function to get the next batch for bulkwalk
+defp bulkwalk_get_next_batch(uri, credential, oids, non_repeaters, max_repetitions, base_oid, options) do
+  debug = Keyword.get(options, :debug, false)
+
+  case bulkwalk_perform_request(uri, credential, oids, non_repeaters, max_repetitions, options) do
+    {:ok, varbinds} ->
+      # Filter out endOfMibView entries and check if end was reached
+      {regular_varbinds, end_of_view_reached} = bulkwalk_filter_results(varbinds, oids, debug)
+
+      # Filter to only OIDs in the subtree
+      in_subtree = Enum.filter(regular_varbinds, fn %{oid: oid} ->
+        result = List.starts_with?(oid, base_oid)
+        if !result do
+          Logger.debug ("OID #{inspect(oid)} is outside the requested subtree #{inspect(base_oid)}")
+          Logger.debug("OID #{inspect(oid)} is outside the requested subtree #{inspect(base_oid)}")
+        end
+
+        result
+      end)
+
+      Logger.debug("Got #{length(in_subtree)} results in subtree out of #{length(varbinds)} total")
+
+      # Determine next OIDs to request
+      next_oids =
+        cond do
+          # If we've reached the end of MIB view, stop here
+          end_of_view_reached ->
+            Logger.debug("EndOfMibView reached, no more OIDs to request")
+            []
+
+          # If we have no results in the subtree, stop here
+          Enum.empty?(in_subtree) ->
+            Logger.debug("No results in subtree, no more OIDs to request")
+            []
+
+          # Otherwise, continue with the next OID
+          true ->
+            # Get the lexicographically greatest OID for the next request
+            [bulkwalk_get_next_oid(in_subtree)]
+        end
+
+      # Double check - if we're using a very broad OID like [1,3,6]
+      # we need to be more aggressive about stopping
+      broad_oid_check =
+        if is_list(base_oid) && length(base_oid) <= 3 &&
+           !Enum.empty?(regular_varbinds) do
+          # Get all endOfMibView markers
+          {_, end_of_mib_markers} = Enum.split_with(varbinds, fn %{type: type} ->
+            type != :"END OF MIB VIEW" && type != :endOfMibView
+          end)
+
+          # For broad OIDs, even one endOfMibView marker might indicate we're at the end
+          if !Enum.empty?(end_of_mib_markers) do
+            Logger.debug("Broad OID detected with endOfMibView markers - extra check enabled")
+            true
+          else
+            false
+          end
+        else
+          false
+        end
+
+      end_reached = end_of_view_reached || Enum.empty?(next_oids) || broad_oid_check
+
+      Logger.debug("Next OIDs to request: #{inspect(next_oids)}")
+      Logger.debug("End reached: #{end_reached}")
+
+      {:ok, in_subtree, next_oids, end_reached}
+
+    {:error, reason} ->
+      Logger.debug("Error in bulkwalk request: #{inspect(reason)}")
+      {:error, reason}
+  end
+end
+
+# Helper function to perform the actual bulk request
+defp bulkwalk_perform_request(uri, credential, oids, non_repeaters, max_repetitions, options) do
+  _perform_bulk_op(uri, credential, oids, non_repeaters, max_repetitions, options)
+end
+
+# Helper function to filter out endOfMibView results and detect if end is reached
+defp bulkwalk_filter_results(varbinds, requested_oids, debug) do
+  # Split into regular varbinds and endOfMibView markers
+  {regular_varbinds, end_of_mib_markers} = Enum.split_with(varbinds, fn %{type: type} ->
+    type != :"END OF MIB VIEW" && type != :endOfMibView
+  end)
+
+  Logger.debug("Total varbinds: #{length(varbinds)}")
+  Logger.debug("Regular varbinds: #{length(regular_varbinds)}")
+  Logger.debug("EndOfMibView markers: #{length(end_of_mib_markers)}")
+
+  if !Enum.empty?(end_of_mib_markers) do
+    Enum.each(end_of_mib_markers, fn %{oid: oid} ->
+      Logger.debug("  EndOfMibView marker for OID: #{inspect(oid)}")
+    end)
+  end
+
+  # For very broad OIDs we need more aggressive detection
+  is_broad_requested_oid = Enum.any?(requested_oids, fn oid -> length(oid) <= 3 end)
+
+  # Check if any requested OIDs have reached endOfMibView
+  end_of_view_reached =
+    if Enum.empty?(end_of_mib_markers) do
+      false
+    else
+      # If we're walking a very broad OID like [1,3,6], even one endOfMibView might be significant
+      if is_broad_requested_oid && length(end_of_mib_markers) > 0 do
+        if debug do
+          Logger.debug ("Broad OID detected with endOfMibView markers - treating as end of view")
+        end
+        true
+      else
+        # For normal OIDs, we check if any requested OID has an endOfMibView marker
+        has_end_markers = Enum.any?(requested_oids, fn req_oid ->
+          Enum.any?(end_of_mib_markers, fn %{oid: oid} ->
+            # Check if this endOfMibView marker is for this requested OID
+            # The marker OID should start with the requested OID
+            result = List.starts_with?(oid, req_oid)
+            if debug && result do
+              Logger.debug ("  Found endOfMibView marker #{inspect(oid)} for requested OID #{inspect(req_oid)}")
+            end
+            result
+          end)
+        end)
+
+        if debug, do: Logger.debug ("Has end markers: #{has_end_markers}")
+        has_end_markers
+      end
+    end
+
+  if debug do
+    Logger.debug ("End of view reached: #{end_of_view_reached}")
+  end
+
+  {regular_varbinds, end_of_view_reached}
+end
+
+# Helper function to get the next OID for continuation
+defp bulkwalk_get_next_oid(results) do
+  results
+  |> Enum.sort_by(& &1.oid)
+  |> List.last()
+  |> Map.get(:oid)
+end
+
+# Add this function to support get_max_repetitions
+defp get_max_repetitions,
+  do: Application.get_env(:snmp_ex, :max_repetitions, 10)
+
   @type mib_name :: String.t()
 
   @spec load_mib(mib_name)
@@ -1139,5 +1416,86 @@ defmodule SNMP do
     oid
     |> String.split(".", trim: true)
     |> Enum.map(&String.to_integer/1)
+  end
+
+  defp _perform_bulk_op(uri, credential, oids, non_repeaters, max_repetitions, options) do
+    log_operations? = Application.get_env(:snmp_ex, :log_snmp_operations, false)
+
+    if log_operations? do
+      Logger.debug("SNMP perform_bulk_op:")
+      Logger.debug("  OIDs: #{inspect(oids)}")
+      Logger.debug("  Non-repeaters: #{non_repeaters}")
+      Logger.debug("  Max-repetitions: #{max_repetitions}")
+    end
+
+    target = generate_target_name(uri, credential)
+    erl_context =
+      options
+      |> Keyword.get(:context, "")
+      |> :binary.bin_to_list()
+
+    discover_fun = fn ->
+      with %{sec_model: :usm} <- credential,
+           {:ok, eid} <- discover_engine_id(uri, target) do
+        :binary.list_to_bin(eid)
+      else
+        _error ->
+          Utility.local_engine_id()
+      end
+    end
+
+    engine_id =
+      options
+      |> Keyword.get_lazy(:engine_id, discover_fun)
+      |> :binary.bin_to_list()
+
+    result = with :ok <-
+           register_usm_user(credential, engine_id),
+         :ok <-
+           register_agent(
+             target,
+             uri,
+             credential,
+             engine_id
+           ),
+         :ok <-
+           warmup_engine_boots_and_engine_time(
+             credential,
+             engine_id,
+             target
+           )
+    do
+      sync_get_bulk(
+        target,
+        non_repeaters,
+        max_repetitions,
+        oids,
+        get_timeout(),
+        erl_context
+      )
+    end
+
+    case result do
+      {:error, {:invalid_oid, _}} = error ->
+        if log_operations?, do: Logger.debug("SNMP: Invalid OID detected in request: #{inspect(error)}")
+        # Return empty result to allow the walk to continue with other OIDs
+        {:ok, []}
+
+      {:error, {:send_failed, _, :tooBig}} = error ->
+        # Handle tooBig error - this means we're requesting too much data at once
+        if log_operations?, do: Logger.debug("SNMP: tooBig error received: #{inspect(error)}")
+        if max_repetitions > 1 do
+          # Try again with half the max_repetitions
+          new_max_rep = div(max_repetitions, 2)
+          if log_operations?, do: Logger.debug("SNMP: Retrying with max_repetitions = #{new_max_rep}")
+          _perform_bulk_op(uri, credential, oids, non_repeaters, new_max_rep, options)
+        else
+          # If max_repetitions is already 1, we can't reduce further
+          {:error, :tooBig}
+        end
+
+      _ ->
+        groom_snmp_result(result)
+    end
   end
 end
