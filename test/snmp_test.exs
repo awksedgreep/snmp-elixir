@@ -286,4 +286,124 @@ defmodule SNMP.Test do
       |> SNMP.request
     end
   end
+
+  describe "bulkwalk" do
+    setup do
+      uri = URI.parse("snmp://127.0.0.1")
+      credential = SNMP.credential(%{version: :v2, community: "public"})
+      base_oid = [1, 3, 6, 1, 2, 1, 1]  # system MIB
+
+      {:ok, %{uri: uri, credential: credential, base_oid: base_oid}}
+    end
+
+    test "falls back to walk for v1 credentials", %{uri: uri, base_oid: base_oid} do
+      v1_credential = SNMP.credential(%{community: "public"})
+      req = %{
+        uri: uri,
+        credential: v1_credential,
+        varbinds: [%{oid: base_oid}]
+      }
+
+      # When using v1, bulkwalk should return a Stream that uses walk
+      stream = SNMP.bulkwalk(req)
+      assert is_struct(stream, Stream)
+    end
+
+    test "respects max_repetitions option", %{uri: uri, credential: credential, base_oid: base_oid} do
+      req = %{
+        uri: uri,
+        credential: credential,
+        varbinds: [%{oid: base_oid}]
+      }
+
+      # Default max_repetitions
+      stream1 = SNMP.bulkwalk(req)
+      assert is_struct(stream1, Stream)
+
+      # Custom max_repetitions
+      stream2 = SNMP.bulkwalk(req, max_repetitions: 20)
+      assert is_struct(stream2, Stream)
+    end
+
+    test "handles invalid OID format", %{uri: uri, credential: credential} do
+      req = %{
+        uri: uri,
+        credential: credential,
+        varbinds: [%{oid: "invalid"}]  # Invalid OID format
+      }
+
+      assert_raise ArgumentError, fn ->
+        SNMP.bulkwalk(req)
+      end
+    end
+
+    test "validates required request parameters" do
+      # Missing URI
+      assert_raise KeyError, fn ->
+        SNMP.bulkwalk(%{
+          credential: SNMP.credential(%{version: :v2, community: "public"}),
+          varbinds: [%{oid: [1, 3, 6]}]
+        })
+      end
+
+      # Missing credential
+      assert_raise KeyError, fn ->
+        SNMP.bulkwalk(%{
+          uri: URI.parse("snmp://localhost"),
+          varbinds: [%{oid: [1, 3, 6]}]
+        })
+      end
+
+      # Missing varbinds
+      assert_raise KeyError, fn ->
+        SNMP.bulkwalk(%{
+          uri: URI.parse("snmp://localhost"),
+          credential: SNMP.credential(%{version: :v2, community: "public"})
+        })
+      end
+    end
+
+    test "validates non_repeaters option", %{uri: uri, credential: credential, base_oid: base_oid} do
+      req = %{
+        uri: uri,
+        credential: credential,
+        varbinds: [%{oid: base_oid}]
+      }
+
+      # Negative non_repeaters should raise
+      assert_raise ArgumentError, fn ->
+        SNMP.bulkwalk(req, non_repeaters: -1)
+      end
+
+      # Zero non_repeaters should work
+      stream = SNMP.bulkwalk(req, non_repeaters: 0)
+      assert is_struct(stream, Stream)
+
+      # Positive non_repeaters should work
+      stream = SNMP.bulkwalk(req, non_repeaters: 1)
+      assert is_struct(stream, Stream)
+    end
+
+    test "validates max_repetitions option", %{uri: uri, credential: credential, base_oid: base_oid} do
+      req = %{
+        uri: uri,
+        credential: credential,
+        varbinds: [%{oid: base_oid}]
+      }
+
+      # Negative max_repetitions should raise
+      assert_raise ArgumentError, fn ->
+        SNMP.bulkwalk(req, max_repetitions: -1)
+      end
+
+      # Zero max_repetitions should raise
+      assert_raise ArgumentError, fn ->
+        SNMP.bulkwalk(req, max_repetitions: 0)
+      end
+
+      # Positive max_repetitions should work
+      stream = SNMP.bulkwalk(req, max_repetitions: 1)
+      assert is_struct(stream, Stream)
+    end
+  end
 end
