@@ -670,6 +670,9 @@ defmodule SNMP do
         object == [] ->
           [[1, 3, 6, 1] | acc]
 
+        object == [1] ->
+          [[1, 3, 6, 1] | acc]
+
         :snmp_misc.is_oid(object) ->
           [object|acc]
 
