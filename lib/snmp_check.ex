@@ -23,6 +23,8 @@ defmodule SNMPCheck do
     _ = credential(%{sec_name: "admin"})
 
     _ = list_oid_to_string([1,3,6])
-    _ = string_oid_to_list("1.3.6")
+    string_oid = string_oid_to_list("1.3.6")
+
+    {:ok, string_oid} # Explicit return value
   end
 end
