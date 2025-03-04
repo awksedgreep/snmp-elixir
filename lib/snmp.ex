@@ -647,9 +647,6 @@ defmodule SNMP do
   defp is_dotted_decimal(_string),
     do: false
 
-  defp normalize_to_oids([[]]),
-    do: []
-
   defp normalize_to_oids(objects) do
     objects
     |> Enum.reduce([], fn object, acc ->
@@ -670,8 +667,8 @@ defmodule SNMP do
           {:ok, oid} = resolve_object_name_to_oid(atom)
 
           [oid|acc]
-      end
-    end)
+        end
+      end)
     |> Enum.reverse()
   end
 

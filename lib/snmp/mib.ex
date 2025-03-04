@@ -183,4 +183,5 @@ defmodule SNMP.MIB do
 
   def compile_all(mib_dir),
     do: compile_all([mib_dir])
+
 end
