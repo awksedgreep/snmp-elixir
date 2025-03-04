@@ -647,10 +647,29 @@ defmodule SNMP do
   defp is_dotted_decimal(_string),
     do: false
 
+  defp normalize_to_oids([]) do
+    # Empty list of objects - return empty list
+    []
+  end
+
+  defp normalize_to_oids([1]) do
+    [[1, 3, 6, 1]]
+  end
+
+  defp normalize_to_oids([[]]) do
+    # Special case: empty OID means "walk entire MIB from root"
+    # Use the internet root OID as the starting point
+    [[1, 3, 6, 1]]
+  end
+
   defp normalize_to_oids(objects) do
     objects
     |> Enum.reduce([], fn object, acc ->
       cond do
+        # Handle empty OID specially
+        object == [] ->
+          [[1, 3, 6, 1] | acc]
+
         :snmp_misc.is_oid(object) ->
           [object|acc]
 
@@ -1198,7 +1217,7 @@ end
 
 # Add this function to support get_max_repetitions
 defp get_max_repetitions,
-  do: Application.get_env(:snmp_ex, :max_repetitions, 10)
+  do: Application.get_env(:snmp_ex, :max_repetitions, 12)
 
   @type mib_name :: String.t()
 
