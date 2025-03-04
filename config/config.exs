@@ -6,6 +6,8 @@ config :snmp_ex,
   # Set logging level
   log_level: :debug,
   # Default request timeout in ms
-  timeout: 10000,
+  timeout: 15000,
+  # Defualt non-repeaters for bulkwalk
+  non_repeaters: 0,
   # Default max repetitions for bulkwalk
   max_repetitions: 12

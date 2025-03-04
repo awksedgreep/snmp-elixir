@@ -1077,7 +1077,7 @@ end
 defp bulkwalk_get_next_batch(uri, credential, oids, non_repeaters, max_repetitions, base_oid, options) do
   debug = Keyword.get(options, :debug, false)
 
-  case bulkwalk_perform_request(uri, credential, oids, non_repeaters, max_repetitions, options) do
+  case _perform_bulk_op(uri, credential, oids, non_repeaters, max_repetitions, options) do
     {:ok, varbinds} ->
       # Filter out endOfMibView entries and check if end was reached
       {regular_varbinds, end_of_view_reached} = bulkwalk_filter_results(varbinds, oids, debug)
@@ -1149,9 +1149,9 @@ defp bulkwalk_get_next_batch(uri, credential, oids, non_repeaters, max_repetitio
 end
 
 # Helper function to perform the actual bulk request
-defp bulkwalk_perform_request(uri, credential, oids, non_repeaters, max_repetitions, options) do
-  _perform_bulk_op(uri, credential, oids, non_repeaters, max_repetitions, options)
-end
+# defp bulkwalk_perform_request(uri, credential, oids, non_repeaters, max_repetitions, options) do
+#   _perform_bulk_op(uri, credential, oids, non_repeaters, max_repetitions, options)
+# end
 
 # Helper function to filter out endOfMibView results and detect if end is reached
 defp bulkwalk_filter_results(varbinds, requested_oids, debug) do

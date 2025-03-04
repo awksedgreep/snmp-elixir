@@ -20,7 +20,7 @@ defmodule Iex_SNMP do
   end
 
   def vb_ifx do
-    [%{oid: [1, 3, 6, 1, 2, 1, 31, 1, 1]}]
+    [%{oid: [1, 3, 6, 1, 2, 1, 31, 1, 1, 1]}]
   end
 
   def get_request do
@@ -108,7 +108,7 @@ defmodule Iex_SNMP do
   end
 
   def bulkwalk_bigpacket do
-    SNMP.bulkwalk(%{uri: uri(), credential: creds(), varbinds: vb_ifx()}, [max_repetitions: 50, timeout: 10000])
+    SNMP.bulkwalk(%{uri: uri(), credential: creds(), varbinds: vb_ifx()}, [max_repetitions: 50, timeout: 20000])
     |> Enum.to_list()
   end
 end
