@@ -1148,11 +1148,6 @@ defp bulkwalk_get_next_batch(uri, credential, oids, non_repeaters, max_repetitio
   end
 end
 
-# Helper function to perform the actual bulk request
-# defp bulkwalk_perform_request(uri, credential, oids, non_repeaters, max_repetitions, options) do
-#   _perform_bulk_op(uri, credential, oids, non_repeaters, max_repetitions, options)
-# end
-
 # Helper function to filter out endOfMibView results and detect if end is reached
 defp bulkwalk_filter_results(varbinds, requested_oids, debug) do
   # Split into regular varbinds and endOfMibView markers
